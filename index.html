@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no"
+  >
+  <title>疯狂原始人</title>
+  <link rel="stylesheet" href="./css/style.css">
+</head>
+<body>
+  <div id="app">
+    <canvas id="gameCanvas" width="1280" height="720" aria-label="疯狂原始人游戏画布"></canvas>
+    <div id="overlay" class="overlay">
+      <div class="panel">
+        <h1>疯狂原始人</h1>
+        <p>小心脚下，也小心终点。</p>
+        <button id="startButton" type="button">开始闯关</button>
+        <p class="tip">左下摇杆移动，右下按键跳跃</p>
+      </div>
+    </div>
+    <div id="hud" class="hud hidden">
+      <div class="hud-left">
+        <span id="levelLabel">第 1 关</span>
+        <span id="deathLabel">失败 0 次</span>
+      </div>
+      <div id="messageBanner" class="message-banner"></div>
+    </div>
+    <div id="controls" class="controls hidden" aria-hidden="true">
+      <div id="joystick" class="joystick">
+        <div id="joystickKnob" class="joystick-knob"></div>
+      </div>
+      <button id="jumpButton" class="jump-button" type="button">跳</button>
+    </div>
+    <div id="errorBanner" class="error-banner hidden">哎呀，出错了，请重启试试吧~</div>
+  </div>
+  <script src="./js/levels.js"></script>
+  <script src="./js/game.js"></script>
+  <script src="./js/main.js"></script>
+</body>
+</html>
