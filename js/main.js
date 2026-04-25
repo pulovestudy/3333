@@ -3,12 +3,44 @@
 
   function createUI(elements) {
     let bannerTimer = null;
+    let actionCleanup = null;
+
+    function clearActionBinding() {
+      if (actionCleanup) {
+        actionCleanup();
+        actionCleanup = null;
+      }
+    }
+
+    function bindAction(button, handler) {
+      function onClick() {
+        clearActionBinding();
+        handler();
+      }
+
+      function onKeyDown(event) {
+        if (event.code === "Enter" || event.code === "Space") {
+          event.preventDefault();
+          onClick();
+        }
+      }
+
+      button.addEventListener("click", onClick);
+      window.addEventListener("keydown", onKeyDown);
+      actionCleanup = function () {
+        button.removeEventListener("click", onClick);
+        window.removeEventListener("keydown", onKeyDown);
+      };
+    }
 
     return {
       setGameVisibility(visible) {
         elements.overlay.classList.toggle("hidden", visible);
         elements.hud.classList.toggle("hidden", !visible);
         elements.controls.classList.toggle("hidden", !visible);
+        if (visible) {
+          clearActionBinding();
+        }
       },
       updateLevel(current) {
         elements.levelLabel.textContent = "第 " + current + " 关";
@@ -24,16 +56,29 @@
           elements.messageBanner.classList.remove("show");
         }, duration || 1200);
       },
+      showLevelClear(config) {
+        clearActionBinding();
+        elements.overlay.classList.remove("hidden");
+        elements.controls.classList.add("hidden");
+        elements.overlay.querySelector(".panel").innerHTML =
+          "<h1>" + config.title + "</h1>" +
+          "<p>" + config.message + "</p>" +
+          "<button id=\"nextLevelButton\" class=\"panel-action\" type=\"button\">" + (config.buttonText || "下一关") + "</button>" +
+          "<p class=\"tip\">" + config.tip + "</p>";
+        const nextLevelButton = document.getElementById("nextLevelButton");
+        bindAction(nextLevelButton, config.onNext);
+      },
       showComplete(totalDeaths) {
+        clearActionBinding();
         elements.overlay.classList.remove("hidden");
         elements.controls.classList.add("hidden");
         elements.overlay.querySelector(".panel").innerHTML =
           "<h1>通关了</h1>" +
           "<p>总失败次数：" + totalDeaths + "</p>" +
-          "<button id=\"restartButton\" type=\"button\">再来一遍</button>" +
+          "<button id=\"restartButton\" class=\"panel-action\" type=\"button\">再来一遍</button>" +
           "<p class=\"tip\">机关已经准备好第二轮了。</p>";
         const restartButton = document.getElementById("restartButton");
-        restartButton.addEventListener("click", function () {
+        bindAction(restartButton, function () {
           window.location.reload();
         });
       },

@@ -62,7 +62,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(32, 23, 17, 0.55);
+  background: rgba(20, 15, 12, 0.72);
   padding: 24px;
   z-index: 4;
 }
@@ -75,6 +75,7 @@ body {
   padding: 28px 24px;
   text-align: center;
   box-shadow: 0 18px 40px rgba(0, 0, 0, 0.28);
+  animation: panel-pop 180ms ease-out;
 }
 
 .panel h1 {
@@ -107,6 +108,21 @@ button {
   border-radius: 999px;
   font-weight: 700;
   font-size: 18px;
+}
+
+.panel-action {
+  min-width: 180px;
+  padding: 14px 24px;
+  background: var(--accent);
+  color: #36220d;
+  border: 3px solid #fff1c7;
+  border-radius: 8px;
+  font-weight: 700;
+  font-size: 18px;
+}
+
+.panel-action:active {
+  transform: translateY(1px);
 }
 
 .hud {
@@ -155,9 +171,7 @@ button {
   justify-content: space-between;
   align-items: flex-end;
   padding:
-    0 calc(18px + var(--safe-right))
-    calc(18px + var(--safe-bottom))
-    calc(18px + var(--safe-left));
+    0 calc(18px + var(--safe-right)) calc(18px + var(--safe-bottom)) calc(18px + var(--safe-left));
   z-index: 3;
   pointer-events: none;
 }
@@ -218,6 +232,18 @@ button {
 
 .hidden {
   display: none !important;
+}
+
+@keyframes panel-pop {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 @media (max-aspect-ratio: 1 / 1) {

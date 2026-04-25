@@ -9,6 +9,18 @@
   const MAX_FALL = 1.25;
   const PLAYER_W = 20;
   const PLAYER_H = 28;
+  const PARTICLE_GRAVITY = 0.0017;
+  const PLAYER_RESPAWN_DELAY = 520;
+  const GRAVITY_SWITCH_FREEZE = 56;
+  const GRAVITY_SWITCH_VISUAL = 90;
+  const GRAVITY_FLIP_PUSH = 0.22;
+  const LEVEL_CLEAR_LINES = [
+    { title: "你居然过了？", message: "这一跳居然没出事，运气和手感都在线。", tip: "下一关可没这么简单", buttonText: "下一关" },
+    { title: "这都能过？", message: "看着像乱跳，结果还真给你跳过去了。", tip: "别太得意", buttonText: "继续挑战" },
+    { title: "还行，有点东西", message: "操作不算离谱，至少机关这次没笑出声。", tip: "后面更难", buttonText: "下一关" },
+    { title: "差点就不行了", message: "再慢半拍，门和你都要一起出事。", tip: "准备好了吗？", buttonText: "继续挑战" },
+    { title: "这只是开始", message: "先别急着庆祝，后面的坑比这关还熟练。", tip: "后面更难", buttonText: "下一关" }
+  ];
 
   function deepClone(value) {
     return JSON.parse(JSON.stringify(value));
@@ -43,7 +55,13 @@
         lastTime: 0,
         bannerTimer: 0,
         bannerText: "",
-        cameraX: 0
+        cameraX: 0,
+        goalMoving: false,
+        goalDestroyed: false,
+        playerDying: false,
+        respawnPending: false,
+        switchFreezeTimer: 0,
+        respawnTimer: 0
       };
 
       this.input = {
@@ -58,6 +76,8 @@
       this.traps = [];
       this.spawn = { x: 2, y: 8 };
       this.goalRect = { x: 0, y: 0, w: 1, h: 2 };
+      this.particles = [];
+      this.snapMarks = [];
 
       this.resize();
     }
@@ -72,7 +92,10 @@
         vy: 0,
         onGround: false,
         justLanded: false,
-        facing: 1
+        facing: 1,
+        gravityDir: 1,
+        snapVisualOffsetY: 0,
+        switchStretchTimer: 0
       };
     }
 
@@ -116,21 +139,28 @@
       this.spawn = { x: this.currentLevel.start.x, y: this.currentLevel.start.y };
       this.goalRect = {
         x: this.currentLevel.goal.x,
-        y: this.currentLevel.goal.y - 1,
+        y: this.currentLevel.goal.y,
         w: 1.2,
         h: 2
       };
+      this.state.goalMoving = false;
+      this.state.goalDestroyed = false;
       this.respawn(false);
       this.ui.updateLevel(index + 1, this.levels.length);
       this.ui.showBanner(this.currentLevel.intro || "别眨眼。", 1800);
     }
 
     instantiateTrap(config) {
-      return Object.assign({
+      const trap = Object.assign({
         active: false,
         triggered: false,
-        timer: 0
+        timer: 0,
+        initialActive: false,
+        initialTriggered: false
       }, config);
+      trap.initialActive = trap.active;
+      trap.initialTriggered = trap.triggered;
+      return trap;
     }
 
     respawn(countDeath) {
@@ -144,12 +174,26 @@
       this.player.x = this.spawn.x * TILE_SIZE + 6;
       this.player.y = this.spawn.y * TILE_SIZE - this.player.h;
       this.state.cameraX = 0;
+      this.state.playerDying = false;
+      this.state.respawnPending = false;
+      this.state.switchFreezeTimer = 0;
+      this.state.respawnTimer = 0;
+      this.particles = [];
+      this.snapMarks = [];
 
       this.traps.forEach((trap) => {
-        trap.active = false;
-        trap.triggered = false;
+        trap.active = Boolean(trap.initialActive);
+        trap.triggered = Boolean(trap.initialTriggered);
         trap.timer = 0;
       });
+
+      if (this.currentLevel.movingGoal) {
+        this.goalRect.x = this.currentLevel.goal.x;
+        this.state.goalMoving = false;
+        this.state.goalDestroyed = false;
+      }
+
+      this.player.gravityDir = this.currentLevel.initialGravityDir || 1;
     }
 
     randomDeathMessage() {
@@ -159,8 +203,14 @@
       return this.messages[Math.floor(Math.random() * this.messages.length)];
     }
 
+    randomLevelClearMessage() {
+      return LEVEL_CLEAR_LINES[Math.floor(Math.random() * LEVEL_CLEAR_LINES.length)];
+    }
+
     update(delta) {
-      if (!this.state.running || this.state.completed) {
+      this.updateEffects(delta);
+
+      if (!this.state.running || this.state.completed || this.state.playerDying) {
         return;
       }
 
@@ -174,13 +224,23 @@
         player.facing = axis > 0 ? 1 : -1;
       }
 
-      if (this.input.jumpQueued && player.onGround) {
-        player.vy = JUMP_SPEED;
-        player.onGround = false;
+      if (this.input.jumpQueued) {
+        if (this.currentLevel.gravityFlip) {
+          this.trySwitchGravity();
+        } else if (player.onGround) {
+          player.vy = JUMP_SPEED;
+          player.onGround = false;
+        }
       }
       this.input.jumpQueued = false;
 
-      player.vy = Math.min(MAX_FALL, player.vy + GRAVITY * delta);
+      if (this.state.switchFreezeTimer > 0) {
+        this.updateCamera();
+        this.checkGoal();
+        return;
+      }
+
+      player.vy = clamp(player.vy + GRAVITY * player.gravityDir * delta, -MAX_FALL, MAX_FALL);
 
       player.x += player.vx * delta;
       this.resolveHorizontal();
@@ -188,10 +248,171 @@
       player.y += player.vy * delta;
       this.resolveVertical();
 
+      if (this.currentLevel.movingGoal && !this.state.goalDestroyed) {
+        if (!this.state.goalMoving && Math.abs(player.vx) > 0) {
+          this.state.goalMoving = true;
+        }
+        if (this.state.goalMoving) {
+          const goalDirection = this.currentLevel.goalDirection || 1;
+          const destroySpike = this.traps.find((trap) => trap.type === "popupSpikes" && trap.initialActive);
+          this.goalRect.x += goalDirection * this.currentLevel.goalSpeed * delta;
+          if (destroySpike && rectsOverlap(this.goalRect, {
+            x: destroySpike.x,
+            y: destroySpike.y,
+            w: destroySpike.w,
+            h: destroySpike.h
+          })) {
+            this.startGoalDestroySequence(goalDirection);
+          }
+        }
+      }
+
       this.updateTraps(delta);
       this.updateCamera();
       this.checkGoal();
       this.checkFallOut();
+    }
+
+    updateEffects(delta) {
+      if (this.particles.length) {
+        this.particles = this.particles.filter((particle) => {
+          particle.life -= delta;
+          if (particle.life <= 0) {
+            return false;
+          }
+          particle.vy += particle.gravity * delta;
+          particle.x += particle.vx * delta;
+          particle.y += particle.vy * delta;
+          return true;
+        });
+      }
+
+
+      if (this.snapMarks.length) {
+        this.snapMarks = this.snapMarks.filter((mark) => {
+          mark.life -= delta;
+          return mark.life > 0;
+        });
+      }
+
+      if (this.player.snapVisualOffsetY !== 0) {
+        const step = Math.min(Math.abs(this.player.snapVisualOffsetY), delta * 0.06);
+        this.player.snapVisualOffsetY += this.player.snapVisualOffsetY > 0 ? -step : step;
+        if (Math.abs(this.player.snapVisualOffsetY) < 0.2) {
+          this.player.snapVisualOffsetY = 0;
+        }
+      }
+
+      if (this.player.switchStretchTimer > 0) {
+        this.player.switchStretchTimer = Math.max(0, this.player.switchStretchTimer - delta);
+      }
+
+      if (this.state.switchFreezeTimer > 0) {
+        this.state.switchFreezeTimer = Math.max(0, this.state.switchFreezeTimer - delta);
+      }
+      if (this.state.respawnPending) {
+        this.state.respawnTimer -= delta;
+        if (this.state.respawnTimer <= 0) {
+          this.respawn(true);
+        }
+      }
+    }
+
+    emitPixelBurst(rect, options) {
+      const cols = options.cols || 4;
+      const rows = options.rows || 4;
+      const colors = options.colors || ["#000000"];
+      const spreadX = options.spreadX || 0.3;
+      const spreadY = options.spreadY || 0.3;
+      const biasX = options.biasX || 0;
+      const biasY = options.biasY || 0;
+      const gravity = options.gravity || PARTICLE_GRAVITY;
+      const lifeMin = options.lifeMin || 300;
+      const lifeMax = options.lifeMax || 600;
+      const sizeMin = options.sizeMin || 4;
+      const sizeMax = options.sizeMax || sizeMin;
+
+      for (let row = 0; row < rows; row += 1) {
+        for (let col = 0; col < cols; col += 1) {
+          const size = Math.round(sizeMin + Math.random() * (sizeMax - sizeMin));
+          const cellW = rect.w / cols;
+          const cellH = rect.h / rows;
+          const x = rect.x + col * cellW + (cellW - size) * 0.5;
+          const y = rect.y + row * cellH + (cellH - size) * 0.5;
+          this.particles.push({
+            x,
+            y,
+            size,
+            color: colors[Math.floor(Math.random() * colors.length)],
+            vx: (Math.random() * 2 - 1) * spreadX + biasX,
+            vy: (Math.random() * 2 - 1) * spreadY + biasY,
+            gravity,
+            life: lifeMin + Math.random() * (lifeMax - lifeMin)
+          });
+        }
+      }
+    }
+
+    startPlayerDeathSequence() {
+      this.emitPixelBurst({
+        x: this.player.x,
+        y: this.player.y,
+        w: this.player.w,
+        h: this.player.h
+      }, {
+        cols: 5,
+        rows: 6,
+        colors: ["#000000"],
+        sizeMin: 4,
+        sizeMax: 5,
+        spreadX: 0.34,
+        spreadY: 0.42,
+        biasY: -0.18,
+        gravity: 0.0018,
+        lifeMin: 320,
+        lifeMax: 760
+      });
+
+      this.state.playerDying = true;
+      this.state.respawnPending = true;
+      this.state.respawnTimer = PLAYER_RESPAWN_DELAY;
+      this.player.vx = 0;
+      this.player.vy = 0;
+      this.input.moveAxis = 0;
+      this.input.jumpQueued = false;
+    }
+
+    startGoalDestroySequence(goalDirection) {
+      const goalPixelRect = {
+        x: this.goalRect.x * TILE_SIZE,
+        y: this.goalRect.y * TILE_SIZE,
+        w: this.goalRect.w * TILE_SIZE,
+        h: this.goalRect.h * TILE_SIZE
+      };
+
+      this.emitPixelBurst(goalPixelRect, {
+        cols: 8,
+        rows: 10,
+        colors: ["#4d3421", "#a87336", "#f1b743"],
+        sizeMin: 3,
+        sizeMax: 4,
+        spreadX: 0.46,
+        spreadY: 0.52,
+        biasX: goalDirection * 0.34,
+        biasY: -0.1,
+        gravity: 0.0017,
+        lifeMin: 340,
+        lifeMax: 820
+      });
+
+      this.state.goalDestroyed = true;
+      this.state.goalMoving = false;
+      this.state.running = false;
+      this.state.respawnPending = true;
+      this.state.respawnTimer = 700;
+      this.input.moveAxis = 0;
+      this.input.jumpQueued = false;
+      this.ui.showBanner("门撞上了最左侧的刺。重新来。", 1200);
     }
 
     resolveHorizontal() {
@@ -223,12 +444,21 @@
           return;
         }
 
-        if (player.vy > 0) {
-          player.y = tile.y - player.h;
-          player.vy = 0;
-          player.onGround = true;
+        if (player.gravityDir > 0) {
+          if (player.vy > 0) {
+            player.y = tile.y - player.h;
+            player.vy = 0;
+            player.onGround = true;
+          } else if (player.vy < 0) {
+            player.y = tile.y + tile.h;
+            player.vy = 0;
+          }
         } else if (player.vy < 0) {
           player.y = tile.y + tile.h;
+          player.vy = 0;
+          player.onGround = true;
+        } else if (player.vy > 0) {
+          player.y = tile.y - player.h;
           player.vy = 0;
         }
         rect.y = player.y;
@@ -237,6 +467,88 @@
       if (!wasOnGround && player.onGround) {
         player.justLanded = true;
       }
+    }
+
+    trySwitchGravity() {
+      const player = this.player;
+      const nextGravityDir = player.gravityDir * -1;
+      const targetY = this.findGravitySnapTarget(nextGravityDir);
+      player.gravityDir = nextGravityDir;
+      player.vy = 0;
+      player.onGround = false;
+      player.justLanded = false;
+      player.snapVisualOffsetY = -nextGravityDir * 2;
+      player.switchStretchTimer = GRAVITY_SWITCH_VISUAL;
+
+      if (targetY !== null) {
+        player.y = targetY;
+        player.onGround = true;
+        player.justLanded = true;
+        this.state.switchFreezeTimer = GRAVITY_SWITCH_FREEZE;
+        this.spawnSnapMarks(nextGravityDir);
+        return;
+      }
+
+      this.state.switchFreezeTimer = 0;
+      player.vy = GRAVITY_FLIP_PUSH * nextGravityDir;
+    }
+
+    findGravitySnapTarget(gravityDir) {
+      const player = this.player;
+      const minTileX = Math.floor(player.x / TILE_SIZE);
+      const maxTileX = Math.floor((player.x + player.w - 1) / TILE_SIZE);
+
+      if (gravityDir > 0) {
+        const startY = Math.floor((player.y + player.h) / TILE_SIZE);
+        for (let tileY = startY; tileY < this.currentMap.length; tileY += 1) {
+          if (!this.rowHasSupport(minTileX, maxTileX, tileY)) {
+            continue;
+          }
+          const candidateY = tileY * TILE_SIZE - player.h;
+          if (this.canOccupy(player.x, candidateY)) {
+            return candidateY;
+          }
+        }
+      } else {
+        const startY = Math.floor(player.y / TILE_SIZE) - 1;
+        for (let tileY = startY; tileY >= 0; tileY -= 1) {
+          if (!this.rowHasSupport(minTileX, maxTileX, tileY)) {
+            continue;
+          }
+          const candidateY = (tileY + 1) * TILE_SIZE;
+          if (this.canOccupy(player.x, candidateY)) {
+            return candidateY;
+          }
+        }
+      }
+
+      return null;
+    }
+
+    rowHasSupport(minTileX, maxTileX, tileY) {
+      for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
+        if (this.isSolidTile(tileX, tileY)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    canOccupy(x, y) {
+      const rect = { x, y, w: this.player.w, h: this.player.h };
+      const tiles = this.getSolidTilesAround(rect);
+      return !tiles.some((tile) => rectsOverlap(rect, tile));
+    }
+
+    spawnSnapMarks(gravityDir) {
+      const contactY = gravityDir > 0 ? this.player.y + this.player.h : this.player.y;
+      const leftX = this.player.x + 4;
+      const rightX = this.player.x + this.player.w - 8;
+      const markY = gravityDir > 0 ? contactY - 2 : contactY;
+      this.snapMarks.push(
+        { x: leftX, y: markY, size: 4, life: GRAVITY_SWITCH_VISUAL },
+        { x: rightX, y: markY, size: 4, life: GRAVITY_SWITCH_VISUAL }
+      );
     }
 
     updateTraps(delta) {
@@ -275,6 +587,19 @@
     }
 
     shouldTriggerTrap(trap, playerRectTiles, playerFeet) {
+      if (trap.type === "dynamicSpike") {
+        if (playerFeet.y < trap.y) {
+          return false;
+        }
+        const playerCenterX = playerRectTiles.x + playerRectTiles.w / 2;
+        const goalCenterX = this.goalRect.x + this.goalRect.w / 2;
+        const goalDirection = this.currentLevel.goalDirection || 1;
+        if (goalDirection < 0) {
+          return playerCenterX >= goalCenterX && playerCenterX - goalCenterX < (trap.triggerDistance || 3);
+        }
+        return playerCenterX <= goalCenterX && goalCenterX - playerCenterX < (trap.triggerDistance || 3);
+      }
+
       const trigger = trap.trigger || { kind: "touch" };
 
       if (trigger.kind === "touch") {
@@ -333,6 +658,9 @@
     }
 
     checkGoal() {
+      if (this.state.goalDestroyed) {
+        return;
+      }
       const playerRectTiles = this.getPlayerRectInTiles();
       if (rectsOverlap(playerRectTiles, this.goalRect)) {
         if (this.state.levelIndex >= this.levels.length - 1) {
@@ -341,20 +669,35 @@
           this.ui.showBanner("通关了。机关说下次再见。", 2400);
           this.ui.showComplete(this.state.totalDeaths);
         } else {
-          this.ui.showBanner("这次算你过。", 1200);
-          this.loadLevel(this.state.levelIndex + 1);
+          const levelClear = this.randomLevelClearMessage();
+          const nextLevelIndex = this.state.levelIndex + 1;
+          this.state.running = false;
+          this.ui.showLevelClear({
+            title: levelClear.title,
+            message: levelClear.message,
+            tip: levelClear.tip,
+            buttonText: levelClear.buttonText,
+            onNext: () => {
+              this.loadLevel(nextLevelIndex);
+              this.state.running = true;
+              this.ui.setGameVisibility(true);
+            }
+          });
         }
       }
     }
 
     checkFallOut() {
-      if (this.player.y > this.currentLevel.height * TILE_SIZE + 200) {
+      if (this.player.y > this.currentLevel.height * TILE_SIZE + 200 || this.player.y + this.player.h < -200) {
         this.failLevel();
       }
     }
 
     failLevel() {
-      this.respawn(true);
+      if (this.state.playerDying || !this.state.running) {
+        return;
+      }
+      this.startPlayerDeathSequence();
     }
 
     updateCamera() {
@@ -403,7 +746,9 @@
       this.drawTiles(ctx);
       this.drawGoal(ctx);
       this.drawTraps(ctx);
+      this.drawSnapMarks(ctx);
       this.drawPlayer(ctx);
+      this.drawParticles(ctx);
     }
 
     worldToScreen(x, y) {
@@ -447,23 +792,28 @@
     }
 
     drawGoal(ctx) {
-      const x = this.goalRect.x * TILE_SIZE;
-      const y = this.goalRect.y * TILE_SIZE;
-      const screen = this.worldToScreen(x, y);
-      ctx.fillStyle = "#4d3421";
-      ctx.fillRect(screen.x + 8, screen.y + 18, 8, TILE_SIZE * 2 - 18);
-      ctx.fillStyle = "#f1b743";
-      ctx.fillRect(screen.x + 16, screen.y + 12, 24, 18);
+      if (this.state.goalDestroyed) {
+        return;
+      }
+      this.drawDoor(ctx, this.goalRect, {
+        outline: "#4d3421",
+        frame: "#8b5c2f",
+        panel: "#d59c49",
+        inset: "#f1b743",
+        handle: "#2a1d14"
+      });
     }
 
     drawTraps(ctx) {
       this.traps.forEach((trap) => {
         if (trap.type === "fakeGoal" && !trap.active) {
-          const screen = this.worldToScreen(trap.x * TILE_SIZE, (trap.y - 1) * TILE_SIZE);
-          ctx.fillStyle = "#9d7f62";
-          ctx.fillRect(screen.x + 8, screen.y + 18, 8, TILE_SIZE * 2 - 18);
-          ctx.fillStyle = "#c9974d";
-          ctx.fillRect(screen.x + 16, screen.y + 12, 24, 18);
+          this.drawDoor(ctx, { x: trap.x, y: trap.y - 1, w: 1.2, h: 2 }, {
+            outline: "#4c4338",
+            frame: "#7e7468",
+            panel: "#b5ab9f",
+            inset: "#d1c8be",
+            handle: "#40382f"
+          });
           return;
         }
 
@@ -471,7 +821,7 @@
           return;
         }
 
-        if (trap.type === "popupSpikes" || trap.type === "chainPopup" || trap.type === "sideSpikes") {
+        if (trap.type === "popupSpikes" || trap.type === "chainPopup" || trap.type === "sideSpikes" || trap.type === "dynamicSpike") {
           this.drawSpikes(ctx, trap);
         }
       });
@@ -504,19 +854,64 @@
       }
     }
 
+    drawDoor(ctx, rect, palette) {
+      const screen = this.worldToScreen(rect.x * TILE_SIZE, rect.y * TILE_SIZE);
+      const doorW = rect.w * TILE_SIZE;
+      const doorH = rect.h * TILE_SIZE;
+
+      ctx.fillStyle = palette.outline;
+      ctx.fillRect(screen.x + 2, screen.y + 2, doorW - 4, doorH - 2);
+      ctx.fillStyle = palette.frame;
+      ctx.fillRect(screen.x + 5, screen.y + 5, doorW - 10, doorH - 8);
+      ctx.fillStyle = palette.panel;
+      ctx.fillRect(screen.x + 9, screen.y + 9, doorW - 18, doorH - 16);
+      ctx.fillStyle = palette.inset;
+      ctx.fillRect(screen.x + 12, screen.y + 13, doorW - 24, 14);
+      ctx.fillRect(screen.x + 12, screen.y + 31, doorW - 24, 20);
+      ctx.fillStyle = palette.handle;
+      ctx.fillRect(screen.x + doorW - 13, screen.y + 33, 3, 3);
+    }
+
+    drawParticles(ctx) {
+      this.particles.forEach((particle) => {
+        const screen = this.worldToScreen(particle.x, particle.y);
+        ctx.fillStyle = particle.color;
+        ctx.fillRect(screen.x, screen.y, particle.size, particle.size);
+      });
+    }
+
+    drawSnapMarks(ctx) {
+      ctx.fillStyle = "#000000";
+      this.snapMarks.forEach((mark) => {
+        const screen = this.worldToScreen(mark.x, mark.y);
+        ctx.fillRect(screen.x, screen.y, mark.size, mark.size);
+      });
+    }
+
     drawPlayer(ctx) {
-      const screen = this.worldToScreen(this.player.x, this.player.y);
-      ctx.fillStyle = "#2c1c12";
-      ctx.fillRect(screen.x + 3, screen.y, 14, 10);
-      ctx.fillStyle = "#f0cf93";
-      ctx.fillRect(screen.x + 4, screen.y + 2, 12, 8);
-      ctx.fillStyle = "#7b4c2c";
-      ctx.fillRect(screen.x + 1, screen.y + 8, 18, 12);
-      ctx.fillRect(screen.x + 4, screen.y + 20, 4, 8);
-      ctx.fillRect(screen.x + 12, screen.y + 20, 4, 8);
-      ctx.fillStyle = "#2c1c12";
-      const eyeX = this.player.facing === 1 ? screen.x + 12 : screen.x + 7;
-      ctx.fillRect(eyeX, screen.y + 5, 2, 2);
+      if (this.state.playerDying) {
+        return;
+      }
+      const screen = this.worldToScreen(this.player.x, this.player.y + this.player.snapVisualOffsetY);
+      const centerX = screen.x + this.player.w / 2;
+      const centerY = screen.y + this.player.h / 2;
+      const stretchActive = this.player.switchStretchTimer > 0;
+      const scaleX = stretchActive ? 1.12 : 1;
+      const scaleY = stretchActive ? 0.88 : 1;
+
+      ctx.save();
+      ctx.translate(centerX, centerY);
+      ctx.scale(scaleX, scaleY * this.player.gravityDir);
+      ctx.translate(-this.player.w / 2, -this.player.h / 2);
+      ctx.fillStyle = "#000000";
+      ctx.fillRect(3, 0, 14, 10);
+      ctx.fillRect(4, 2, 12, 8);
+      ctx.fillRect(1, 8, 18, 12);
+      ctx.fillRect(4, 20, 4, 8);
+      ctx.fillRect(12, 20, 4, 8);
+      const eyeX = this.player.facing === 1 ? 12 : 7;
+      ctx.fillRect(eyeX, 5, 2, 2);
+      ctx.restore();
     }
   }
 
